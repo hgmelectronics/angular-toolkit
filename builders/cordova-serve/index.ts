@@ -1,6 +1,6 @@
 import { BuildEvent, Builder, BuilderConfiguration, BuilderContext, BuilderDescription } from '@angular-devkit/architect';
 import { NormalizedBrowserBuilderSchema } from '@angular-devkit/build-angular/src/browser/schema';
-import { DevServerBuilder, DevServerBuilderOptions } from '@angular-devkit/build-angular/src/dev-server';
+import { DevServerBuilderOptions } from '@angular-devkit/build-angular/src/dev-server';
 import { Path, virtualFs } from '@angular-devkit/core';
 import * as fs from 'fs';
 import { Observable, from, of } from 'rxjs';
@@ -31,8 +31,27 @@ export class CordovaServeBuilder implements Builder<CordovaServeBuilderSchema> {
       concatMap(() => this.context.architect.validateBuilderOptions(devServerBuilderConfig, devServerDescription)),
       concatMap(() => this._getCordovaBuildConfig(cordovaServeOptions)),
       tap(config => cordovaBuildConfig = config),
-      concatMap(() => of(new CordovaDevServerBuilder(this.context, cordovaBuildConfig.options))),
-      concatMap(builder => builder.run(devServerBuilderConfig))
+      concatMap(() => of(this.context.architect.getBuilder(devServerDescription, this.context))),
+      concatMap(builder => {
+        (builder as any).cordovaBuildOptions = cordovaBuildConfig.options;
+        (builder as any).superBuildWebpackConfig = (builder as any).buildWebpackConfig;
+        (builder as any).buildWebpackConfig = function(root: Path, projectRoot: Path, host: virtualFs.Host<fs.Stats>, browserOptions: NormalizedBrowserBuilderSchema) {
+          const builder = new CordovaBuildBuilder(this.context);
+          builder.validateBuilderConfig(this.cordovaBuildOptions);
+          builder.prepareBrowserConfig(this.cordovaBuildOptions, browserOptions);
+
+          return this.superBuildWebpackConfig(root, projectRoot, host, browserOptions);
+        };
+        (builder as any).superRun = (builder as any).run;
+        (builder as any).run = function(builderConfig: BuilderConfiguration<DevServerBuilderOptions>): Observable<BuildEvent> {
+          if (this.cordovaBuildOptions.consolelogs && this.cordovaBuildOptions.consolelogsPort) {
+            return from(createConsoleLogServer(builderConfig.options.host, this.cordovaBuildOptions.consolelogsPort))
+              .pipe(_ => this.superRun(builderConfig));
+          }
+          return this.superRun(builderConfig);
+        }
+        return builder.run(devServerBuilderConfig);
+      })
     );
   }
 
@@ -54,28 +73,6 @@ export class CordovaServeBuilder implements Builder<CordovaServeBuilderSchema> {
     return this.context.architect.getBuilderDescription(cordovaBuildTargetConfig).pipe(
       concatMap(cordovaBuildDescription => this.context.architect.validateBuilderOptions(cordovaBuildTargetConfig, cordovaBuildDescription))
     );
-  }
-}
-
-class CordovaDevServerBuilder extends DevServerBuilder {
-  constructor(context: BuilderContext, public cordovaBuildOptions: CordovaBuildBuilderSchema) {
-    super(context);
-  }
-
-  run(builderConfig: BuilderConfiguration<DevServerBuilderOptions>): Observable<BuildEvent> {
-    if (this.cordovaBuildOptions.consolelogs && this.cordovaBuildOptions.consolelogsPort) {
-      return from(createConsoleLogServer(builderConfig.options.host, this.cordovaBuildOptions.consolelogsPort))
-        .pipe(_ => super.run(builderConfig));
-    }
-    return super.run(builderConfig);
-  }
-
-  buildWebpackConfig(root: Path, projectRoot: Path, host: virtualFs.Host<fs.Stats>, browserOptions: NormalizedBrowserBuilderSchema) {
-    const builder = new CordovaBuildBuilder(this.context);
-    builder.validateBuilderConfig(this.cordovaBuildOptions);
-    builder.prepareBrowserConfig(this.cordovaBuildOptions, browserOptions);
-
-    return super.buildWebpackConfig(root, projectRoot, host, browserOptions);
   }
 }
 
